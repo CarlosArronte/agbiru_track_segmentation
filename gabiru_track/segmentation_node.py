@@ -14,7 +14,7 @@ class SegmentationNode(Node):
         super().__init__('segmentation_node')
         self.srv = self.create_service(Trigger, 'ready_to_receive_path', self.ready_callback)
         self.client = self.create_client(Trigger, 'ready_to_receive_optimization')
-        self.publisher_ = self.create_publisher(String, 'gabiru/segments', 1000)
+        self.publisher_ = self.create_publisher(String, '/gabiru/segments', 1000)
         self.published = False
         self.waypoints = None
         self.get_logger().info("Esperando waypoints en el tópico /optimal_path...")
@@ -39,6 +39,10 @@ class SegmentationNode(Node):
             y = pose.position.y
             waypoints.append([x, y])
         self.waypoints = np.array(waypoints)
+        self.get_logger().info(f"Recibidas {len(waypoints)} poses desde /optimal_path")
+        if np.any(np.isnan(self.waypoints)) or np.any(np.isinf(self.waypoints)):
+            self.get_logger().error("Waypoints contienen NaN o valores infinitos")
+            return
         self.wait_for_ready()
 
     def wait_for_ready(self):
@@ -65,28 +69,39 @@ class SegmentationNode(Node):
         while self.publisher_.get_subscription_count() == 0:
             self.get_logger().info("Esperando a que se conecte el optimizador...")
             rclpy.spin_once(self, timeout_sec=2)
-        segments = segment_track_by_curvature(self.waypoints)
-        for i, segment in enumerate(segments):
-            tipo = segment["tipo"]
-            indices = segment["indices"]
-            segment_wp = self.waypoints[indices, :].tolist()
-            data = {
-                "segment_id": i,
-                "tipo": tipo,
-                "waypoints": segment_wp,
-                "indices": indices.tolist()  # Añadir índices al JSON
-            }
-            msg = String()
-            msg.data = json.dumps(data)
-            self.publisher_.publish(msg)
-            self.get_logger().info(f"Publicado segmento {i}: tipo={tipo}, puntos={len(indices)}")
-        self.published = True
+        try:
+            segments = segment_track_by_curvature(self.waypoints)
+            self.get_logger().info(f"Generados {len(segments)} segmentos")
+            for i, segment in enumerate(segments):
+                tipo = segment["tipo"]
+                indices = segment["indices"]
+                segment_wp = self.waypoints[indices, :].tolist()
+                # Convertir indices a lista si no lo es
+                indices_list = indices.tolist() if isinstance(indices, np.ndarray) else indices
+                data = {
+                    "segment_id": i,
+                    "tipo": tipo,
+                    "waypoints": segment_wp,
+                    "indices": indices_list
+                }
+                msg = String()
+                msg.data = json.dumps(data)
+                self.publisher_.publish(msg)
+                self.get_logger().info(f"Publicado segmento {i}: tipo={tipo}, puntos={len(indices)}")
+            self.published = True
+        except Exception as e:
+            self.get_logger().error(f"Error al procesar segmentos: {e}")
 
 def main(args=None):
     rclpy.init(args=args)
     node = SegmentationNode()
-    rclpy.spin(node)
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
